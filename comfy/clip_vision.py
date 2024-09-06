@@ -1,13 +1,12 @@
-from .utils import load_torch_file, transformers_convert, state_dict_prefix_replace
+import mlx.core as mx
+import mlx.nn as nn
 import os
-import torch
 import json
 import logging
 
 import comfy.ops
 import comfy.model_patcher
 import comfy.model_management
-import comfy.utils
 import comfy.clip_model
 
 class Output:
@@ -17,17 +16,17 @@ class Output:
         setattr(self, key, item)
 
 def clip_preprocess(image, size=224):
-    mean = torch.tensor([ 0.48145466,0.4578275,0.40821073], device=image.device, dtype=image.dtype)
-    std = torch.tensor([0.26862954,0.26130258,0.27577711], device=image.device, dtype=image.dtype)
-    image = image.movedim(-1, 1)
+    mean = mx.array([0.48145466, 0.4578275, 0.40821073], device=image.device, dtype=image.dtype)
+    std = mx.array([0.26862954, 0.26130258, 0.27577711], device=image.device, dtype=image.dtype)
+    image = mx.moveaxis(image, -1, 1)
     if not (image.shape[2] == size and image.shape[3] == size):
-        scale = (size / min(image.shape[2], image.shape[3]))
-        image = torch.nn.functional.interpolate(image, size=(round(scale * image.shape[2]), round(scale * image.shape[3])), mode="bicubic", antialias=True)
-        h = (image.shape[2] - size)//2
-        w = (image.shape[3] - size)//2
-        image = image[:,:,h:h+size,w:w+size]
-    image = torch.clip((255. * image), 0, 255).round() / 255.0
-    return (image - mean.view([3,1,1])) / std.view([3,1,1])
+        scale = size / min(image.shape[2], image.shape[3])
+        image = mx.nn.functional.interpolate(image, size=(round(scale * image.shape[2]), round(scale * image.shape[3])), mode="bicubic", antialias=True)
+        h = (image.shape[2] - size) // 2
+        w = (image.shape[3] - size) // 2
+        image = image[:, :, h:h+size, w:w+size]
+    image = mx.clip((255. * image), 0, 255).round() / 255.0
+    return (image - mean.view([3, 1, 1])) / std.view([3, 1, 1])
 
 class ClipVisionModel():
     def __init__(self, json_config):
@@ -51,7 +50,7 @@ class ClipVisionModel():
 
     def encode_image(self, image):
         comfy.model_management.load_model_gpu(self.patcher)
-        pixel_values = clip_preprocess(image.to(self.load_device), size=self.image_size).float()
+        pixel_values = clip_preprocess(mx.array(image, device=self.load_device), size=self.image_size).astype(mx.float32)
         out = self.model(pixel_values=pixel_values, intermediate_output=-2)
 
         outputs = Output()
@@ -62,23 +61,23 @@ class ClipVisionModel():
 
 def convert_to_transformers(sd, prefix):
     sd_k = sd.keys()
-    if "{}transformer.resblocks.0.attn.in_proj_weight".format(prefix) in sd_k:
+    if f"{prefix}transformer.resblocks.0.attn.in_proj_weight" in sd_k:
         keys_to_replace = {
-            "{}class_embedding".format(prefix): "vision_model.embeddings.class_embedding",
-            "{}conv1.weight".format(prefix): "vision_model.embeddings.patch_embedding.weight",
-            "{}positional_embedding".format(prefix): "vision_model.embeddings.position_embedding.weight",
-            "{}ln_post.bias".format(prefix): "vision_model.post_layernorm.bias",
-            "{}ln_post.weight".format(prefix): "vision_model.post_layernorm.weight",
-            "{}ln_pre.bias".format(prefix): "vision_model.pre_layrnorm.bias",
-            "{}ln_pre.weight".format(prefix): "vision_model.pre_layrnorm.weight",
+            f"{prefix}class_embedding": "vision_model.embeddings.class_embedding",
+            f"{prefix}conv1.weight": "vision_model.embeddings.patch_embedding.weight",
+            f"{prefix}positional_embedding": "vision_model.embeddings.position_embedding.weight",
+            f"{prefix}ln_post.bias": "vision_model.post_layernorm.bias",
+            f"{prefix}ln_post.weight": "vision_model.post_layernorm.weight",
+            f"{prefix}ln_pre.bias": "vision_model.pre_layrnorm.bias",
+            f"{prefix}ln_pre.weight": "vision_model.pre_layrnorm.weight",
         }
 
         for x in keys_to_replace:
             if x in sd_k:
                 sd[keys_to_replace[x]] = sd.pop(x)
 
-        if "{}proj".format(prefix) in sd_k:
-            sd['visual_projection.weight'] = sd.pop("{}proj".format(prefix)).transpose(0, 1)
+        if f"{prefix}proj" in sd_k:
+            sd['visual_projection.weight'] = sd.pop(f"{prefix}proj").transpose(0, 1)
 
         sd = transformers_convert(sd, prefix, "vision_model.", 48)
     else:
@@ -104,7 +103,7 @@ def load_clipvision_from_sd(sd, prefix="", convert_keys=False):
     clip = ClipVisionModel(json_config)
     m, u = clip.load_sd(sd)
     if len(m) > 0:
-        logging.warning("missing clip vision: {}".format(m))
+        logging.warning(f"missing clip vision: {m}")
     u = set(u)
     keys = list(sd.keys())
     for k in keys:
